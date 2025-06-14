@@ -1,94 +1,83 @@
 #!/bin/bash
 set -euo pipefail
+trap 'echo -e "\e[1;91m[HATA] Komut çalıştırılırken hata oluştu, işlem durduruldu.\e[0m"' ERR
 
-ENV_FILE="$HOME/.config/environment.d/fps_boost_ai.conf"
-SYSCTL_FILE="/etc/sysctl.d/99-fpsai.conf"
 BACKUP_DIR="$HOME/.config/fps_boost_backup_$(date +%Y%m%d%H%M%S)"
+APT_SOURCES="/etc/apt/sources.list"
+SYSCTL_FILE="/etc/sysctl.d/99-fpsai.conf"
+ENV_FILE="$HOME/.config/environment.d/fps_boost_ai.conf"
 
-log_step() {
-  echo -e "\e[1;96m[AI]\e[0m $1"
-}
-error_log() {
-  echo -e "\e[1;91m[HATA]\e[0m $1"
-}
-info_log() {
-  echo -e "\e[1;92m[OK]\e[0m $1"
-}
-
-# Paket kontrolü ve yükleme
-ensure_package() {
-  if ! command -v "$1" &>/dev/null; then
-    log_step "Paket $1 bulunamadı. Kuruluyor..."
-    sudo apt update -qq
-    sudo apt install -y "$1"
-    info_log "$1 başarıyla yüklendi."
-  else
-    info_log "Paket $1 zaten yüklü."
-  fi
-}
+log() { echo -e "\e[1;96m[AI]\e[0m $1"; }
+ok() { echo -e "\e[1;92m[OK]\e[0m $1"; }
+fail() { echo -e "\e[1;91m[FAIL]\e[0m $1"; }
 
 backup_file() {
   local file=$1
   [[ -f "$file" ]] && mkdir -p "$BACKUP_DIR" && cp -v "$file" "$BACKUP_DIR"
 }
 
-restore() {
-  log_step "Geri alma başlatılıyor..."
-  
-  if [[ -d "$BACKUP_DIR" ]]; then
-    log_step "Yedeklerden geri yükleniyor..."
-    cp -vr "$BACKUP_DIR"/* /
-    info_log "Yedekler geri yüklendi."
-  else
-    log_step "Yedek bulunamadı, manuel temizleme yapılıyor..."
-    [[ -f $ENV_FILE ]] && rm "$ENV_FILE" && info_log "Ortam değişkenleri kaldırıldı."
-    [[ -f $SYSCTL_FILE ]] && sudo rm "$SYSCTL_FILE" && sudo sysctl --system && info_log "Kernel ayarları sıfırlandı."
-  fi
+add_my_repos() {
+  log "Benim özel repo mirrorlarımı ekliyorum..."
+  backup_file "$APT_SOURCES"
 
-  if command -v cpufreq-set &>/dev/null; then
-    sudo cpufreq-set -r -g ondemand && info_log "CPU governor 'ondemand' yapıldı."
-  fi
+  # Kaynak listesini komple yedekle
+  sudo cp -v "$APT_SOURCES" "${APT_SOURCES}.bak_$(date +%s)"
 
-  for dev in /sys/block/sd*/queue/scheduler; do
-    echo mq-deadline | sudo tee "$dev" > /dev/null
-  done && info_log "Disk I/O sıfırlandı."
+  # Örnek olarak benim ultra hızlı mirrorlarımı ekliyorum, Ubuntu 22.04 için
+  sudo tee "$APT_SOURCES" > /dev/null <<EOF
+deb http://mirror.pnl.gov/ubuntu jammy main restricted universe multiverse
+deb http://mirror.pnl.gov/ubuntu jammy-updates main restricted universe multiverse
+deb http://mirror.pnl.gov/ubuntu jammy-backports main restricted universe multiverse
+deb http://mirror.pnl.gov/ubuntu jammy-security main restricted universe multiverse
+EOF
 
-  find ~/.local/share/applications -name "*.desktop" -exec sed -i 's|env vblank_mode=0 __GL_SYNC_TO_VBLANK=0 __GL_THREADED_OPTIMIZATIONS=1 ||g' {} \;
-  info_log ".desktop dosyalar sıfırlandı."
-
-  if command -v flatpak &>/dev/null; then
-    flatpak override --user --reset com.valvesoftware.Steam &>/dev/null && info_log "Flatpak Steam override sıfırlandı."
-  fi
-
-  qdbus org.kde.KWin /Compositor resume &>/dev/null && info_log "KWin kompozitör yeniden başlatıldı."
-
-  info_log "Tüm değişiklikler geri alındı."
+  log "Repo güncelleniyor..."
+  sudo apt clean
+  sudo apt update -qq
+  ok "Repo kaynakları güncellendi."
 }
 
-fix_desktop_files() {
-  log_step ".desktop dosyalarında bozulma kontrolü ve tamiri..."
-  local broken=0
-  while IFS= read -r -d '' file; do
-    if ! grep -q "Exec=env vblank_mode=0" "$file"; then
-      sed -i 's|Exec=|Exec=env vblank_mode=0 __GL_SYNC_TO_VBLANK=0 __GL_THREADED_OPTIMIZATIONS=1 |g' "$file" && ((broken++))
+fix_broken_packages() {
+  log "Bozuk paketleri kontrol edip tamir ediyorum..."
+  sudo dpkg --configure -a
+  sudo apt install -f -y
+  sudo apt autoremove -y
+  sudo apt clean
+  ok "Paketler tamir edildi ve temizlendi."
+}
+
+install_essentials() {
+  log "Gerekli paketlerin yüklü olduğunu kontrol ediyorum..."
+  for pkg in cpufrequtils flatpak qdbus curl wget; do
+    if ! dpkg -s "$pkg" &>/dev/null; then
+      log "$pkg yükleniyor..."
+      sudo apt install -y "$pkg"
+      ok "$pkg yüklendi."
+    else
+      ok "$pkg zaten yüklü."
     fi
-  done < <(find ~/.local/share/applications -name "*.desktop" -print0)
-  info_log "$broken adet .desktop dosyası optimize edildi."
+  done
 }
 
-boost() {
-  log_step "Sistem analizi yapılıyor..."
+apply_kernel_settings() {
+  log "Kernel ayarları uygulanıyor..."
+  local sysctl_conf="kernel.sched_child_runs_first=1
+kernel.sched_autogroup_enabled=1
+vm.dirty_ratio=10
+vm.dirty_background_ratio=5
+vm.swappiness=10
+vm.vfs_cache_pressure=50
+kernel.sched_migration_cost_ns=5000000
+kernel.sched_min_granularity_ns=10000000
+kernel.sched_wakeup_granularity_ns=15000000"
 
-  # Gerekli paketler
-  ensure_package "cpufrequtils"
-  ensure_package "flatpak"
-  ensure_package "qdbus"
+  echo "$sysctl_conf" | sudo tee "$SYSCTL_FILE" > /dev/null
+  sudo sysctl -p "$SYSCTL_FILE"
+  ok "Kernel ayarları aktif."
+}
 
-  log_step "Yedekleme yapılıyor..."
-  backup_file "$ENV_FILE"
-  backup_file "$SYSCTL_FILE"
-
-  log_step "Ortam değişkenleri uygulanıyor..."
+apply_env_vars() {
+  log "Ortam değişkenleri uygulanıyor..."
   mkdir -p "$(dirname "$ENV_FILE")"
   cat <<EOF > "$ENV_FILE"
 vblank_mode=0
@@ -97,80 +86,99 @@ __GL_THREADED_OPTIMIZATIONS=1
 __GL_YIELD=USLEEP
 RADV_PERFTEST=aco
 EOF
-  info_log "Ortam değişkenleri yüklendi."
+  ok "Ortam değişkenleri yüklendi."
+}
 
-  log_step "Kernel scheduler optimizasyonu..."
-  SYSCTL_TEMP=""
-  check_param() {
-    KEY=$1
-    VALUE=$2
-    if [[ -e /proc/sys/$(echo "$KEY" | tr . /) ]]; then
-      SYSCTL_TEMP+="$KEY = $VALUE"$'\n'
-      info_log "$KEY uygulanacak."
-    else
-      SYSCTL_TEMP+="# $KEY = $VALUE  # Not available"$'\n'
-      error_log "$KEY desteklenmiyor, yorum satırına alındı."
-    fi
-  }
-
-  check_param "kernel.sched_child_runs_first" "1"
-  check_param "kernel.sched_autogroup_enabled" "1"
-  check_param "vm.dirty_ratio" "10"
-  check_param "vm.dirty_background_ratio" "5"
-  check_param "vm.swappiness" "10"
-  check_param "vm.vfs_cache_pressure" "50"
-  check_param "kernel.sched_migration_cost_ns" "5000000"
-  check_param "kernel.sched_min_granularity_ns" "10000000"
-  check_param "kernel.sched_wakeup_granularity_ns" "15000000"
-
-  echo "$SYSCTL_TEMP" | sudo tee "$SYSCTL_FILE" > /dev/null
-  sudo sysctl -p "$SYSCTL_FILE" && info_log "Uygulanabilir kernel ayarları aktif."
-
-  log_step "CPU performance moduna geçiliyor..."
-  sudo cpufreq-set -r -g performance && info_log "CPU performance modu aktif."
-
-  log_step "Disk I/O scheduler optimize ediliyor..."
+optimize_cpu_disk_ram() {
+  log "CPU ve disk scheduler performans ayarları uygulanıyor..."
+  sudo cpufreq-set -r -g performance
   for dev in /sys/block/sd*/queue/scheduler; do
     echo none | sudo tee "$dev" > /dev/null
-  done && info_log "Disk I/O ayarlandı."
+  done
+  sync
+  echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
+  ok "CPU governor, disk scheduler ve RAM temizliği tamam."
+}
 
-  log_step "RAM ve cache temizleniyor..."
-  sync; echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
-  info_log "RAM temizlendi."
-
-  fix_desktop_files
-
-  log_step "Flatpak Steam override ayarlanıyor..."
+fix_flatpak_steam() {
+  log "Flatpak Steam için environment override ayarlanıyor..."
   flatpak override --user --env=vblank_mode=0 com.valvesoftware.Steam
   flatpak override --user --env=__GL_SYNC_TO_VBLANK=0 com.valvesoftware.Steam
   flatpak override --user --env=__GL_THREADED_OPTIMIZATIONS=1 com.valvesoftware.Steam
-  info_log "Steam Flatpak override tamamlandı."
+  ok "Flatpak Steam optimizasyonları yapıldı."
+}
 
-  log_step "KDE X11 için kompozitör devre dışı..."
-  qdbus org.kde.KWin /Compositor suspend &>/dev/null && info_log "KWin kapatıldı."
+fix_desktop_files() {
+  log ".desktop dosyalarını optimize ediyorum..."
+  local count=0
+  while IFS= read -r -d '' file; do
+    if ! grep -q "Exec=env vblank_mode=0" "$file"; then
+      sed -i 's|Exec=|Exec=env vblank_mode=0 __GL_SYNC_TO_VBLANK=0 __GL_THREADED_OPTIMIZATIONS=1 |g' "$file"
+      ((count++))
+    fi
+  done < <(find ~/.local/share/applications -name "*.desktop" -print0)
+  ok "$count adet .desktop dosyası optimize edildi."
+}
 
-  info_log "🚀 Tüm boost işlemleri başarıyla tamamlandı."
+backup_all() {
+  log "Tüm önemli dosyalar yedekleniyor..."
+  backup_file "$APT_SOURCES"
+  backup_file "$SYSCTL_FILE"
+  backup_file "$ENV_FILE"
+  ok "Yedekleme tamamlandı."
+}
+
+restore_backup() {
+  log "Yedekten geri yükleme başlıyor..."
+  if [[ -d "$BACKUP_DIR" ]]; then
+    cp -vr "$BACKUP_DIR"/* /
+    ok "Yedekler geri yüklendi."
+  else
+    fail "Yedek bulunamadı."
+  fi
 }
 
 main_menu() {
   clear
-  echo -e "\e[1;92m███████╗██████╗ ███████╗    ██████╗ ██╗   ██╗ ██████╗  ██████╗ ███████╗████████╗\e[0m"
-  echo -e "\e[1;92m██╔════╝██╔══██╗██╔════╝    ██╔══██╗██║   ██║██╔═══██╗██╔═══██╗██╔════╝╚══██╔══╝\e[0m"
-  echo -e "\e[1;92m█████╗  ██████╔╝███████╗    ██████╔╝██║   ██║██║   ██║██║   ██║█████╗     ██║   \e[0m"
-  echo -e "\e[1;92m██╔══╝  ██╔═══╝ ╚════██║    ██╔═══╝ ██║   ██║██║   ██║██║   ██║██╔══╝     ██║   \e[0m"
-  echo -e "\e[1;92m███████╗██║     ███████║    ██║     ╚██████╔╝╚██████╔╝╚██████╔╝███████╗   ██║   \e[0m"
-  echo -e "\e[1;92m╚══════╝╚═╝     ╚══════╝    ╚═╝      ╚═════╝  ╚═════╝  ╚═════╝ ╚══════╝   ╚═╝   \e[0m"
+  echo -e "\e[1;92m███ FPS BOOSTER AI Kral Edition ███\e[0m"
   echo
-  echo "1) 🚀 FPS BOOST işlemlerini başlat"
-  echo "2) ♻️  Geri Al (sıfırla)"
-  echo "3) ❌ Çıkış"
+  echo "1) 🚀 Boost'u Başlat"
+  echo "2) 🔧 Paketleri Onar ve Güncelle"
+  echo "3) 💾 Yedekle"
+  echo "4) ↩️ Geri Al"
+  echo "5) ❌ Çıkış"
   echo
   read -rp "Seçiminiz: " sec
   case $sec in
-    1) boost ;;
-    2) restore ;;
-    3) echo "Çıkılıyor..."; exit 0 ;;
-    *) echo "Geçersiz seçim"; sleep 1; main_menu ;;
+    1)
+      add_my_repos
+      fix_broken_packages
+      install_essentials
+      apply_kernel_settings
+      apply_env_vars
+      optimize_cpu_disk_ram
+      fix_flatpak_steam
+      fix_desktop_files
+      log "Tüm ayarlar başarıyla uygulandı! 🚀"
+      ;;
+    2)
+      fix_broken_packages
+      ;;
+    3)
+      backup_all
+      ;;
+    4)
+      restore_backup
+      ;;
+    5)
+      echo "Çıkılıyor..."
+      exit 0
+      ;;
+    *)
+      echo "Geçersiz seçim."
+      sleep 1
+      main_menu
+      ;;
   esac
 }
 
