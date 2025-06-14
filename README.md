@@ -45,7 +45,7 @@ Automatically detects your system settings and applies only what works. Works on
 
 1. Download or clone this repo:
 ```bash
-git clone https://github.com/Xzya-c/linux-fps-boost-for-kde/tree/linux-fps-boost-for-kde.git
+git clone https://github.com/Xzya-c/linux-fps-boost-for-kde.git
 cd linux-fps-boost-for-kde
 chmod +x fpsboost.sh
 ./fpsboost.sh
