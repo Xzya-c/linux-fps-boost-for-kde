@@ -140,7 +140,7 @@ restore_backup() {
 
 main_menu() {
   clear
-  echo -e "\e[1;92m███ FPS BOOSTER AI Kral Edition ███\e[0m"
+  echo -e "\e[1;92m███ FPS BOOSTER linux███\e[0m"
   echo
   echo "1) 🚀 Boost'u Başlat"
   echo "2) 🔧 Paketleri Onar ve Güncelle"
